@@ -36,7 +36,7 @@ registration.)
 
 | Path | What happens |
 |------|--------------|
-| **`see` tool** | deepseek-v4-flash can call `see(path \| data, instruction?)` to look at any image file or base64 data. The tool sends it to gpt-5.6-luna and returns a detailed textual description. |
+| **`see` tool** | deepseek-v4-flash can call `see(path \| data, instruction?)` to look at any image file or base64 data. The tool sends it to the eye model and returns a detailed textual description. The result shows the `instruction` the blind model passed. **The tool only exists for text-only models** — vision-capable models don't see it in their tool list (and a guard blocks it if called anyway). |
 | **Attached images** | When you attach an image to a message (drag & drop, or `pi @image.png "…"`), the `input` event intercepts it, the eye describes it, and the prompt is rewritten as text — the blind model never receives raw pixels. |
 | **Context safety net** | If image parts still reach the context by any other route (e.g. images returned by tools), the `context` event replaces them with eye descriptions before the request is sent. |
 
