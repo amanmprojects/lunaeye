@@ -14,19 +14,24 @@
  *  3. Safety net on the `context` event — any image parts that still reach the
  *     context (e.g. images returned by the `read` tool) are replaced with eye
  *     descriptions before the request is sent.
- *  4. `/eye` command — status and cache control.
+ *  4. `/eye` command — status, vision-model picker (`/eye set <n|model>`), cache control.
+ *
+ * The eye model is configurable at runtime via `/eye set` and persisted to
+ * `~/.pi/agent/luna-eye.json` (defaults: `opencode-go/gpt-5.6-luna`).
  *
  * All model calls go through `ctx.modelRegistry.complete()` so the eye uses
- * Pi's own credential resolution for opencode-go — no hardcoded keys.
+ * Pi's own credential resolution — no hardcoded keys.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 
 const EYE_PROVIDER = "opencode-go";
 const EYE_MODEL = "gpt-5.6-luna";
@@ -36,6 +41,77 @@ const MAX_CACHE_ENTRIES = 96;
 
 /** Description cache: image hash -> eye description. Avoids re-paying for the same image. */
 const descriptionCache = new Map<string, string>();
+
+// ---------------------------------------------------------------------------
+// Eye model configuration (runtime-switchable, persisted)
+// ---------------------------------------------------------------------------
+
+const CONFIG_PATH = resolve(homedir(), ".pi", "agent", "luna-eye.json");
+
+/** Active eye model selection — mutable at runtime via `/eye set`. */
+let eyeProvider: string = EYE_PROVIDER;
+let eyeModel: string = EYE_MODEL;
+try {
+  const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as {
+    eyeProvider?: unknown;
+    eyeModel?: unknown;
+  };
+  if (typeof cfg.eyeProvider === "string" && cfg.eyeProvider.trim()) eyeProvider = cfg.eyeProvider.trim();
+  if (typeof cfg.eyeModel === "string" && cfg.eyeModel.trim()) eyeModel = cfg.eyeModel.trim();
+} catch {
+  // No config yet: use defaults.
+}
+
+function saveEyeConfig(): void {
+  try {
+    mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    writeFileSync(CONFIG_PATH, JSON.stringify({ eyeProvider, eyeModel }, null, 2) + "\n");
+  } catch (err) {
+    console.error(`[luna-eye] failed to write config: ${describeError(err)}`);
+  }
+}
+
+function eyeLabel(): string {
+  return `${eyeProvider}/${eyeModel}`;
+}
+
+function fmtCost(n: number): string {
+  return n >= 1 ? n.toFixed(2) : String(n);
+}
+
+/** All models across configured providers that accept image input. */
+function visionModels(ctx: ExtensionContext): Model<Api>[] {
+  return ctx.modelRegistry
+    .getAvailable()
+    .filter((m) => m.input.includes("image"))
+    .sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id));
+}
+
+/** Resolve `/eye set` target: a 1-based list number, a bare model id, or provider/model. */
+function resolveEyeTarget(
+  target: string,
+  vision: Model<Api>[],
+): { provider: string; id: string } | { error: string } {
+  const t = target.trim();
+  if (/^\d+$/.test(t)) {
+    const idx = Number(t);
+    if (idx < 1 || idx > vision.length) return { error: `Number out of range — pick 1–${vision.length}` };
+    return { provider: vision[idx - 1].provider, id: vision[idx - 1].id };
+  }
+  let provider: string | undefined;
+  let id = t;
+  const slash = t.indexOf("/");
+  if (slash !== -1) {
+    provider = t.slice(0, slash);
+    id = t.slice(slash + 1);
+  }
+  const matches = vision.filter((m) => m.id === id && (provider === undefined || m.provider === provider));
+  if (matches.length === 0) return { error: `No vision-capable model '${t}' available` };
+  if (matches.length > 1) {
+    return { error: `'${id}' exists on ${matches.map((m) => m.provider).join(", ")} — use provider/model` };
+  }
+  return { provider: matches[0].provider, id: matches[0].id };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,8 +146,8 @@ function describeError(err: unknown): string {
 }
 
 /**
- * Send one image to gpt-5.6-luna through Pi's own model registry and return
- * the textual description. Cached per image hash.
+ * Send one image to the configured eye model through Pi's own model registry
+ * and return the textual description. Cached per image + instruction.
  */
 async function describeImage(
   img: ImageContent,
@@ -83,9 +159,9 @@ async function describeImage(
   const cached = descriptionCache.get(key);
   if (cached !== undefined) return cached;
 
-  const model = ctx.modelRegistry.find(EYE_PROVIDER, EYE_MODEL);
+  const model = ctx.modelRegistry.find(eyeProvider, eyeModel);
   if (!model) {
-    throw new Error(`Eye model ${EYE_PROVIDER}/${EYE_MODEL} is not registered`);
+    throw new Error(`Eye model ${eyeProvider}/${eyeModel} is not registered`);
   }
 
   const timeout = AbortSignal.timeout(EYE_TIMEOUT_MS);
@@ -201,15 +277,15 @@ export default function lunaEye(pi: ExtensionAPI) {
     name: "see",
     label: "👁️ See (Luna Eye)",
     description:
-      "Look at an image using gpt-5.6-luna (your eye model on opencode-go) and return a detailed textual description. This is the ONLY way you can perceive visual content — use it whenever you need to see an image file, screenshot, diagram, UI mockup, or attached picture. Pass either `path` (image file) or `data` (base64 data URL / raw base64).",
-    promptSnippet: "👁️ see(path|data, instruction?) — describe an image via gpt-5.6-luna (your eye)",
+      `Look at an image using ${eyeLabel()} (your eye model) and return a detailed textual description. This is the ONLY way you can perceive visual content — use it whenever you need to see an image file, screenshot, diagram, UI mockup, or attached picture. Pass either \`path\` (image file) or \`data\` (base64 data URL / raw base64). Run /eye to switch the eye model.`,
+    promptSnippet: `👁️ see(path|data, instruction?) — describe an image via ${eyeLabel()} (your eye)`,
     promptGuidelines: [
       "You cannot process images directly — you are a text-only model. Whenever the user asks about an image, screenshot, diagram, or anything visual, call the `see` tool instead of guessing.",
       "If you used the `read` tool on an image file, call `see` with that same path to actually perceive what it shows.",
     ],
     parameters: SeeParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      onUpdate?.({ content: [{ type: "text", text: `👁️ Luna Eye (${EYE_MODEL}) is looking…` }], details: {} });
+      onUpdate?.({ content: [{ type: "text", text: `👁️ Luna Eye (${eyeModel}) is looking…` }], details: {} });
       try {
         let img: ImageContent;
         if (params.path) {
@@ -237,16 +313,16 @@ export default function lunaEye(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `[👁️ Luna Eye (${EYE_MODEL}) saw the image${params.path ? ` at ${params.path}` : ""}:\n${description}\n]`,
+              text: `[👁️ Luna Eye (${eyeModel}) saw the image${params.path ? ` at ${params.path}` : ""}:\n${description}\n]`,
             },
           ],
-          details: { eye: EYE_MODEL, provider: EYE_PROVIDER, source: params.path ?? "data" },
+          details: { eye: eyeModel, provider: eyeProvider, source: params.path ?? "data" },
         };
       } catch (err) {
         return {
           content: [{ type: "text", text: `👁️ Luna Eye failed: ${describeError(err)}` }],
           isError: true,
-          details: { eye: EYE_MODEL, provider: EYE_PROVIDER, error: describeError(err) },
+          details: { eye: eyeModel, provider: eyeProvider, error: describeError(err) },
         };
       }
     },
@@ -275,7 +351,7 @@ export default function lunaEye(pi: ExtensionAPI) {
         .join("\n\n");
       return {
         action: "transform",
-        text: `${event.text}\n\n[👁️ Luna Eye (${EYE_MODEL}) — ${label} described for the text-only model (${BRAIN_MODEL}):\n${blocks}\n]`,
+        text: `${event.text}\n\n[👁️ Luna Eye (${eyeModel}) — ${label} described for the text-only model (${BRAIN_MODEL}):\n${blocks}\n]`,
       };
     } catch (err) {
       ctx.ui.notify(`Luna Eye failed to describe the attached image: ${describeError(err)}`, "error");
@@ -347,7 +423,7 @@ export default function lunaEye(pi: ExtensionAPI) {
           for (let i = 0; i < msg.content.length; i++) {
             const part = msg.content[i];
             if (part.type === "text" && part.text === "[👁️ Luna Eye image placeholder]") {
-              msg.content[i] = { type: "text", text: `[👁️ Luna Eye (${EYE_MODEL}) saw an image:\n${descriptions[idx++]}\n]` };
+              msg.content[i] = { type: "text", text: `[👁️ Luna Eye (${eyeModel}) saw an image:\n${descriptions[idx++]}\n]` };
             }
           }
         }
@@ -375,7 +451,7 @@ export default function lunaEye(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI && isBlind(ctx.model)) {
       ctx.ui.notify(
-        `👁️ Luna Eye active — ${EYE_PROVIDER}/${EYE_MODEL} sees for ${ctx.model?.id ?? "the current model"}`,
+        `👁️ Luna Eye active — ${eyeProvider}/${eyeModel} sees for ${ctx.model?.id ?? "the current model"}`,
         "info",
       );
     }
@@ -384,7 +460,7 @@ export default function lunaEye(pi: ExtensionAPI) {
   pi.on("model_select", async (event, ctx) => {
     if (ctx.hasUI && event.model && !event.model.input.includes("image")) {
       ctx.ui.notify(
-        `👁️ ${event.model.id} is text-only — Luna Eye (${EYE_MODEL}) is available via the see tool`,
+        `👁️ ${event.model.id} is text-only — Luna Eye (${eyeModel}) is available via the see tool`,
         "info",
       );
     }
@@ -395,23 +471,56 @@ export default function lunaEye(pi: ExtensionAPI) {
   // -------------------------------------------------------------------------
   pi.registerCommand("eye", {
     description:
-      "Luna Eye status and cache control. Usage: /eye [status|clear] — status shows the eye model and whether the active model is blind; clear empties the description cache.",
+      "Luna Eye: show status and pick the eye model. Usage: /eye — status + vision model list; /eye set <number|model|provider/model> — switch eye model (persisted); /eye clear — clear description cache.",
     handler: async (args, ctx) => {
-      const arg = (args ?? "").trim().toLowerCase();
-      if (arg === "clear") {
+      const [verb, ...rest] = (args ?? "").trim().split(/\s+/);
+      const low = verb.toLowerCase();
+
+      if (low === "clear") {
         const cleared = descriptionCache.size;
         descriptionCache.clear();
         ctx.ui.notify(`👁️ Luna Eye: cleared ${cleared} cached description(s)`, "info");
         return;
       }
+
+      if (low === "set") {
+        const target = rest.join(" ");
+        if (!target) {
+          ctx.ui.notify("Usage: /eye set <number|model|provider/model>", "info");
+          return;
+        }
+        const vision = visionModels(ctx);
+        const resolved = resolveEyeTarget(target, vision);
+        if ("error" in resolved) {
+          ctx.ui.notify(`👁️ ${resolved.error}`, "error");
+          return;
+        }
+        const prev = `${eyeProvider}/${eyeModel}`;
+        eyeProvider = resolved.provider;
+        eyeModel = resolved.id;
+        saveEyeConfig();
+        descriptionCache.clear();
+        ctx.ui.notify(`👁️ Eye model: ${prev} → ${eyeProvider}/${eyeModel} (persisted, cache cleared)`, "info");
+        return;
+      }
+
+      // Status + vision model list.
       const model = ctx.model;
-      const eye = ctx.modelRegistry.find(EYE_PROVIDER, EYE_MODEL);
+      const eye = ctx.modelRegistry.find(eyeProvider, eyeModel);
+      const vision = visionModels(ctx);
       const lines = [
-        `Eye model : ${EYE_PROVIDER}/${EYE_MODEL} ${eye ? (eye.input.includes("image") ? "(vision ✓)" : "(no vision!)") : "(not registered)"}`,
+        `Eye model : ${eyeProvider}/${eyeModel} ${eye ? (eye.input.includes("image") ? "(vision ✓)" : "(no vision!)") : "(not registered)"}`,
         `Active    : ${model ? `${model.provider}/${model.id}` : "none"} — ${isBlind(model) ? `text-only (Luna Eye translates images for ${BRAIN_MODEL})` : "has vision (Luna Eye passive)"}`,
         `Cache     : ${descriptionCache.size} described image(s)`,
-        `Usage     : call the see tool, or attach an image to a message`,
+        `Vision models (${vision.length}):`,
       ];
+      vision.forEach((m, i) => {
+        const current = m.provider === eyeProvider && m.id === eyeModel ? " ← current" : "";
+        lines.push(
+          `  ${i + 1}. ${m.provider}/${m.id} — $${fmtCost(m.cost.input)}/$${fmtCost(m.cost.output)} per MTok${current}`,
+        );
+      });
+      lines.push(`Switch: /eye set <number|model|provider/model>`);
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });

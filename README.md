@@ -33,18 +33,26 @@ registration.)
 | **Attached images** | When you attach an image to a message (drag & drop, or `pi @image.png "…"`), the `input` event intercepts it, the eye describes it, and the prompt is rewritten as text — the blind model never receives raw pixels. |
 | **Context safety net** | If image parts still reach the context by any other route (e.g. images returned by tools), the `context` event replaces them with eye descriptions before the request is sent. |
 
-Descriptions are cached per-image (sha256), so repeated turns never re-pay for
-the same image. `/eye clear` empties the cache.
+Descriptions are cached per image + instruction (sha256), so repeated turns never re-pay for
+the same query. `/eye clear` empties the cache.
+
+The eye model is runtime-switchable and persisted to `~/.pi/agent/luna-eye.json`.
 
 ## Commands
 
-- `/eye` — show eye model, active model vision status, cache size
-- `/eye status` — same as above
+- `/eye` — status + numbered list of **all vision-capable models** across your
+  configured providers, with prices per MTok and the current eye marked
+- `/eye set <n>` — pick by list number
+- `/eye set <model>` — e.g. `/eye set mimo-v2.5` (if unique)
+- `/eye set <provider>/<model>` — e.g. `/eye set opencode-go/mimo-v2.5`
 - `/eye clear` — clear the description cache
+
+Switching the eye model also clears the cache, so stale descriptions from the
+previous model are never reused.
 
 ## Configuration
 
-Constants at the top of `luna-eye.ts`:
+Defaults at the top of `luna-eye.ts`:
 
 ```ts
 const EYE_PROVIDER = "opencode-go";
@@ -53,6 +61,15 @@ const BRAIN_MODEL = "deepseek-v4-flash";
 const EYE_TIMEOUT_MS = 180_000;
 const MAX_CACHE_ENTRIES = 96;
 ```
+
+The effective eye model is overridden at runtime by `/eye set`, which persists
+to `~/.pi/agent/luna-eye.json`:
+
+```json
+{ "eyeProvider": "opencode-go", "eyeModel": "mimo-v2.5" }
+```
+
+Delete that file to fall back to the code defaults.
 
 The eye call uses `reasoningEffort: "low"` for fast, cheap perception. When the
 active model has native vision (e.g. gpt-5.6-luna itself), Luna Eye goes fully
@@ -71,4 +88,12 @@ pi -p "@/tmp/eye-test2.png" "This image was attached. Describe what colors it co
 
 pi -p "Use the read tool on /tmp/eye-test.png, then tell me what the image shows."
 → model detected blindness and called `see`            (tool fallback ✓)
+
+Eye switched to mimo-v2.5 via /eye set, then:
+
+pi -p "Use the see tool to look at /tmp/eye-mimo1.png and tell me exactly what text is in the image."
+→ "LUNA EYE TEST 2026 / The password is: zebra-42"   (mimo-v2.5 verbatim text ✓)
+
+pi -p "Call the see tool TWICE on /tmp/eye-mimo2.png. First: 'What color is the circle?' Second: 'What color is the background?'"
+→ "blue" / "bright, saturated red"                       (mimo-v2.5 instructions ✓)
 ```
