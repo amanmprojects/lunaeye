@@ -9,15 +9,22 @@ Pi's credential resolution (no hardcoded keys).
 
 The extension is a single file: [`luna-eye.ts`](luna-eye.ts).
 
-Install globally (all projects):
+**One command (recommended)** — install as a pi package from this repo:
+
+```bash
+pi install git:github.com/amanmprojects/lunaeye
+```
+
+That clones the repo into `~/.pi/agent/git/github.com/amanmprojects/lunaeye`, adds it
+to `~/.pi/agent/settings.json`, and loads the extension in every project.
+Uninstall with `pi remove git:github.com/amanmprojects/lunaeye`. Updates: re-run
+`pi install` to re-pin, or `pi update --extension git:github.com/amanmprojects/lunaeye`.
+
+Or manually — copy or symlink into the global extensions dir:
 
 ```bash
 cp luna-eye.ts ~/.pi/agent/extensions/luna-eye.ts
-```
-
-or symlink it so the installed extension tracks this repo:
-
-```bash
+# or symlink so the installed extension tracks this repo:
 ln -s "$(pwd)/luna-eye.ts" ~/.pi/agent/extensions/luna-eye.ts
 ```
 
