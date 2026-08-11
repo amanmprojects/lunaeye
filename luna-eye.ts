@@ -24,6 +24,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import { SelectList, Input, getKeybindings, fuzzyFilter, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
@@ -75,6 +76,28 @@ function saveEyeConfig(): void {
 
 function eyeLabel(): string {
   return `${eyeProvider}/${eyeModel}`;
+}
+
+/** Human-readable version of the instruction the blind model gave the eye. */
+function instructionLabel(userInstruction?: string): string {
+  return userInstruction?.trim()
+    ? `instruction: "${userInstruction.trim()}"`
+    : "instruction: (default — full description)";
+}
+
+/**
+ * The `see` tool should only exist for text-only models. Vision-capable models
+ * see images natively, so hide it from their tool list (and re-add it when a
+ * blind model becomes active).
+ */
+function syncSeeTool(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  const active = new Set(pi.getActiveTools());
+  const wantActive = isBlind(ctx.model);
+  if (wantActive && !active.has("see")) {
+    pi.setActiveTools([...active, "see"]);
+  } else if (!wantActive && active.has("see")) {
+    pi.setActiveTools([...active].filter((t) => t !== "see"));
+  }
 }
 
 /** Switch the eye model, persist, and drop stale cached descriptions. */
@@ -406,7 +429,12 @@ export default function lunaEye(pi: ExtensionAPI) {
     ],
     parameters: SeeParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      onUpdate?.({ content: [{ type: "text", text: `👁️ Luna Eye (${eyeModel}) is looking…` }], details: {} });
+      onUpdate?.({
+        content: [
+          { type: "text", text: `👁️ Luna Eye (${eyeModel}) — ${instructionLabel(params.instruction)} — looking…` },
+        ],
+        details: {},
+      });
       try {
         let img: ImageContent;
         if (params.path) {
@@ -434,7 +462,7 @@ export default function lunaEye(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `[👁️ Luna Eye (${eyeModel}) saw the image${params.path ? ` at ${params.path}` : ""}:\n${description}\n]`,
+              text: `[👁️ Luna Eye (${eyeModel}) — ${instructionLabel(params.instruction)} — saw the image${params.path ? ` at ${params.path}` : ""}:\n${description}\n]`,
             },
           ],
           details: { eye: eyeModel, provider: eyeProvider, source: params.path ?? "data" },
@@ -567,9 +595,23 @@ export default function lunaEye(pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------------
+  // Guard: `see` is only for text-only models. If a vision-capable model ever
+  // calls it (e.g. stale session state), block it.
+  // -------------------------------------------------------------------------
+  pi.on("tool_call", (event, ctx) => {
+    if (isToolCallEventType("see", event) && !isBlind(ctx.model)) {
+      return {
+        block: true,
+        reason: "The `see` tool is only available to text-only models — vision-capable models perceive images natively.",
+      };
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // Notifications
   // -------------------------------------------------------------------------
   pi.on("session_start", async (_event, ctx) => {
+    syncSeeTool(pi, ctx);
     if (ctx.hasUI && isBlind(ctx.model)) {
       ctx.ui.notify(
         `👁️ Luna Eye active — ${eyeProvider}/${eyeModel} sees for ${ctx.model?.id ?? "the current model"}`,
@@ -579,6 +621,7 @@ export default function lunaEye(pi: ExtensionAPI) {
   });
 
   pi.on("model_select", async (event, ctx) => {
+    syncSeeTool(pi, ctx);
     if (ctx.hasUI && event.model && !event.model.input.includes("image")) {
       ctx.ui.notify(
         `👁️ ${event.model.id} is text-only — Luna Eye (${eyeModel}) is available via the see tool`,
