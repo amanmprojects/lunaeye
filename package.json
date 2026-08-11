@@ -1,0 +1,10 @@
+{
+  "name": "luna-eye",
+  "version": "1.0.0",
+  "description": "👁️ Luna Eye — gives text-only Pi models vision via a separate eye model (e.g. gpt-5.6-luna or mimo-v2.5 on opencode-go).",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./luna-eye.ts"]
+  }
+}
