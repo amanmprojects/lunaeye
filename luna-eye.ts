@@ -75,6 +75,16 @@ function eyeLabel(): string {
   return `${eyeProvider}/${eyeModel}`;
 }
 
+/** Switch the eye model, persist, and drop stale cached descriptions. */
+function applyEyeTarget(provider: string, id: string, ctx: ExtensionContext): void {
+  const prev = `${eyeProvider}/${eyeModel}`;
+  eyeProvider = provider;
+  eyeModel = id;
+  saveEyeConfig();
+  descriptionCache.clear();
+  ctx.ui.notify(`👁️ Eye model: ${prev} → ${eyeProvider}/${eyeModel} (persisted, cache cleared)`, "info");
+}
+
 function fmtCost(n: number): string {
   return n >= 1 ? n.toFixed(2) : String(n);
 }
@@ -471,7 +481,7 @@ export default function lunaEye(pi: ExtensionAPI) {
   // -------------------------------------------------------------------------
   pi.registerCommand("eye", {
     description:
-      "Luna Eye: show status and pick the eye model. Usage: /eye — status + vision model list; /eye set <number|model|provider/model> — switch eye model (persisted); /eye clear — clear description cache.",
+      "Luna Eye: interactive vision-model picker. Usage: /eye — interactive picker (TUI) or model list; /eye set <number|model|provider/model> — switch eye model (persisted); /eye clear — clear description cache.",
     handler: async (args, ctx) => {
       const [verb, ...rest] = (args ?? "").trim().split(/\s+/);
       const low = verb.toLowerCase();
@@ -495,19 +505,52 @@ export default function lunaEye(pi: ExtensionAPI) {
           ctx.ui.notify(`👁️ ${resolved.error}`, "error");
           return;
         }
-        const prev = `${eyeProvider}/${eyeModel}`;
-        eyeProvider = resolved.provider;
-        eyeModel = resolved.id;
-        saveEyeConfig();
-        descriptionCache.clear();
-        ctx.ui.notify(`👁️ Eye model: ${prev} → ${eyeProvider}/${eyeModel} (persisted, cache cleared)`, "info");
+        if (resolved.provider === eyeProvider && resolved.id === eyeModel) {
+          ctx.ui.notify(`👁️ Already using ${eyeProvider}/${eyeModel}`, "info");
+          return;
+        }
+        applyEyeTarget(resolved.provider, resolved.id, ctx);
         return;
       }
 
-      // Status + vision model list.
+      const vision = visionModels(ctx);
+      if (vision.length === 0) {
+        ctx.ui.notify("👁️ No vision-capable models available on configured providers", "warning");
+        return;
+      }
+
+      // Interactive picker (TUI/RPC) — same overlay UX as the built-in model picker.
+      if (ctx.hasUI) {
+        const labelToModel = new Map<string, { provider: string; id: string }>();
+        const sorted = [...vision].sort((a, b) => {
+          const aCur = a.provider === eyeProvider && a.id === eyeModel ? 0 : 1;
+          const bCur = b.provider === eyeProvider && b.id === eyeModel ? 0 : 1;
+          return aCur - bCur || a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
+        });
+        const options = sorted.map((m) => {
+          const current = m.provider === eyeProvider && m.id === eyeModel ? " ← current" : "";
+          const label = `${m.provider}/${m.id} — $${fmtCost(m.cost.input)}/$${fmtCost(m.cost.output)} per MTok${current}`;
+          labelToModel.set(label, { provider: m.provider, id: m.id });
+          return label;
+        });
+        const chosen = await ctx.ui.select(
+          `👁️ Luna Eye — current: ${eyeProvider}/${eyeModel}. Pick a vision model:`,
+          options,
+        );
+        if (!chosen) return; // cancelled (Esc)
+        const target = labelToModel.get(chosen);
+        if (!target) return;
+        if (target.provider === eyeProvider && target.id === eyeModel) {
+          ctx.ui.notify(`👁️ Already using ${eyeProvider}/${eyeModel}`, "info");
+          return;
+        }
+        applyEyeTarget(target.provider, target.id, ctx);
+        return;
+      }
+
+      // Non-interactive fallback: status + numbered list.
       const model = ctx.model;
       const eye = ctx.modelRegistry.find(eyeProvider, eyeModel);
-      const vision = visionModels(ctx);
       const lines = [
         `Eye model : ${eyeProvider}/${eyeModel} ${eye ? (eye.input.includes("image") ? "(vision ✓)" : "(no vision!)") : "(not registered)"}`,
         `Active    : ${model ? `${model.provider}/${model.id}` : "none"} — ${isBlind(model) ? `text-only (Luna Eye translates images for ${BRAIN_MODEL})` : "has vision (Luna Eye passive)"}`,
