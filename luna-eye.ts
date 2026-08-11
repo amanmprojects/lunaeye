@@ -26,7 +26,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
-import { SelectList, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
+import { SelectList, Input, getKeybindings, fuzzyFilter, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -290,7 +290,9 @@ type SeeParams = Static<typeof SeeParams>;
  * a `(n/total)` scroll indicator, like /model.
  */
 class EyePickerComponent implements Component {
-  private selectList: SelectList;
+  private allItems: SelectItem[];
+  private selectList!: SelectList;
+  private searchInput: Input;
   private tui: TUI;
   private theme: Theme;
   private done: (value: string | null) => void;
@@ -305,18 +307,42 @@ class EyePickerComponent implements Component {
     this.tui = tui;
     this.theme = theme;
     this.done = done;
+    this.allItems = items;
+    this.searchInput = new Input();
+    this.searchInput.focused = true;
+    // Enter in the search box picks the best (first filtered) match, like /model.
+    this.searchInput.onSubmit = () => {
+      const selected = this.selectList.getSelectedItem();
+      if (selected) this.finish(selected.value);
+    };
+    this.buildList(items);
+  }
+
+  private buildList(items: SelectItem[]): void {
     const listTheme: SelectListTheme = {
-      selectedPrefix: (s) => theme.fg("accent", s),
-      selectedText: (s) => theme.fg("accent", s),
-      description: (s) => theme.fg("dim", s),
-      scrollInfo: (s) => theme.fg("dim", s),
-      noMatch: (s) => theme.fg("warning", s),
+      selectedPrefix: (s) => this.theme.fg("accent", s),
+      selectedText: (s) => this.theme.fg("accent", s),
+      description: (s) => this.theme.fg("dim", s),
+      scrollInfo: (s) => this.theme.fg("dim", s),
+      noMatch: (s) => this.theme.fg("warning", s),
     };
     this.selectList = new SelectList(items, EYE_PICKER_PAGE_SIZE, listTheme, {
       minPrimaryColumnWidth: 24,
     });
     this.selectList.onSelect = (item) => this.finish(item.value);
     this.selectList.onCancel = () => this.finish(null);
+  }
+
+  /** Rebuild the list from the search query (fuzzy, best match first). */
+  private applyFilter(query: string): void {
+    const q = query.trim();
+    this.buildList(
+      q
+        ? fuzzyFilter(this.allItems, q, (item) =>
+            `${item.value} ${item.label} ${item.description ?? ""}`.trim(),
+          )
+        : this.allItems,
+    );
   }
 
   private finish(value: string | null): void {
@@ -326,7 +352,20 @@ class EyePickerComponent implements Component {
   }
 
   handleInput(data: string): void {
-    this.selectList.handleInput(data);
+    const kb = getKeybindings();
+    if (kb.matches(data, "tui.select.up")) {
+      this.selectList.handleInput(data);
+    } else if (kb.matches(data, "tui.select.down")) {
+      this.selectList.handleInput(data);
+    } else if (kb.matches(data, "tui.select.confirm")) {
+      this.selectList.handleInput(data);
+    } else if (kb.matches(data, "tui.select.cancel")) {
+      this.finish(null);
+    } else {
+      // Everything else goes into the search box, like /model.
+      this.searchInput.handleInput(data);
+      this.applyFilter(this.searchInput.getValue());
+    }
     if (!this.closed) this.tui.requestRender();
   }
 
@@ -334,7 +373,9 @@ class EyePickerComponent implements Component {
     const th = this.theme;
     return [
       th.fg("accent", `👁️ Luna Eye — pick a vision model (current: ${eyeProvider}/${eyeModel})`),
-      th.fg("dim", `↑/↓ navigate · Enter select · Esc cancel`),
+      th.fg("dim", `type to filter · ↑/↓ navigate · Enter select · Esc cancel`),
+      "",
+      ...this.searchInput.render(width),
       "",
       ...this.selectList.render(width),
     ];
@@ -342,6 +383,7 @@ class EyePickerComponent implements Component {
 
   invalidate(): void {
     this.selectList.invalidate();
+    this.searchInput.invalidate();
   }
 
   dispose(): void {}

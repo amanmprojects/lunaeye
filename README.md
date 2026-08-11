@@ -40,12 +40,14 @@ The eye model is runtime-switchable and persisted to `~/.pi/agent/luna-eye.json`
 
 ## Commands
 
-- `/eye` — **paged interactive picker** (like `/model`): full-screen,
-  keyboard-navigable list of all vision-capable models across your configured
-  providers, **max 6 visible rows** with a `(n/total)` page indicator as you
-  scroll (↑/↓, wrap-around). Current eye listed first with `✓`. Enter selects,
-  Esc cancels. In RPC mode it becomes a plain select dialog; in print mode a
-  numbered list.
+- `/eye` — **paged interactive picker with live search** (like `/model`):
+  full-screen, keyboard-navigable list of all vision-capable models across
+  your configured providers. Just start **typing to filter** (fuzzy, best match
+  first, e.g. `mimo`, `claude`, `qwen3`), **max 6 visible rows** with a
+  `(n/total)` page indicator as you scroll (↑/↓, wrap-around). Current eye
+  listed first with `✓`. Enter selects the highlighted model (or the best
+  match from the search box), Esc cancels. In RPC mode it becomes a plain
+  select dialog; in print mode a numbered list.
 - `/eye set <n>` — pick by list number (scriptable, works in `-p` mode)
 - `/eye set <model>` — e.g. `/eye set mimo-v2.5` (if unique)
 - `/eye set <provider>/<model>` — e.g. `/eye set opencode-go/mimo-v2.5`
