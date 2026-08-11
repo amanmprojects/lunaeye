@@ -23,9 +23,10 @@
  * Pi's own credential resolution — no hardcoded keys.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
+import { SelectList, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -38,6 +39,7 @@ const EYE_MODEL = "gpt-5.6-luna";
 const BRAIN_MODEL = "deepseek-v4-flash";
 const EYE_TIMEOUT_MS = 180_000;
 const MAX_CACHE_ENTRIES = 96;
+const EYE_PICKER_PAGE_SIZE = 6;
 
 /** Description cache: image hash -> eye description. Avoids re-paying for the same image. */
 const descriptionCache = new Map<string, string>();
@@ -277,6 +279,73 @@ const SeeParams = Type.Object({
   ),
 });
 type SeeParams = Static<typeof SeeParams>;
+
+// ---------------------------------------------------------------------------
+// Interactive paged picker (TUI) — same UX as the built-in /model picker
+// ---------------------------------------------------------------------------
+
+/**
+ * Full-screen picker for the eye model, rendered via `ctx.ui.custom()`.
+ * Uses pi-tui's SelectList, which pages the list (maxVisible rows) and shows
+ * a `(n/total)` scroll indicator, like /model.
+ */
+class EyePickerComponent implements Component {
+  private selectList: SelectList;
+  private tui: TUI;
+  private theme: Theme;
+  private done: (value: string | null) => void;
+  private closed = false;
+
+  constructor(
+    tui: TUI,
+    theme: Theme,
+    items: SelectItem[],
+    done: (value: string | null) => void,
+  ) {
+    this.tui = tui;
+    this.theme = theme;
+    this.done = done;
+    const listTheme: SelectListTheme = {
+      selectedPrefix: (s) => theme.fg("accent", s),
+      selectedText: (s) => theme.fg("accent", s),
+      description: (s) => theme.fg("dim", s),
+      scrollInfo: (s) => theme.fg("dim", s),
+      noMatch: (s) => theme.fg("warning", s),
+    };
+    this.selectList = new SelectList(items, EYE_PICKER_PAGE_SIZE, listTheme, {
+      minPrimaryColumnWidth: 24,
+    });
+    this.selectList.onSelect = (item) => this.finish(item.value);
+    this.selectList.onCancel = () => this.finish(null);
+  }
+
+  private finish(value: string | null): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.done(value);
+  }
+
+  handleInput(data: string): void {
+    this.selectList.handleInput(data);
+    if (!this.closed) this.tui.requestRender();
+  }
+
+  render(width: number): string[] {
+    const th = this.theme;
+    return [
+      th.fg("accent", `👁️ Luna Eye — pick a vision model (current: ${eyeProvider}/${eyeModel})`),
+      th.fg("dim", `↑/↓ navigate · Enter select · Esc cancel`),
+      "",
+      ...this.selectList.render(width),
+    ];
+  }
+
+  invalidate(): void {
+    this.selectList.invalidate();
+  }
+
+  dispose(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Extension
@@ -519,15 +588,39 @@ export default function lunaEye(pi: ExtensionAPI) {
         return;
       }
 
-      // Interactive picker (TUI/RPC) — same overlay UX as the built-in model picker.
-      if (ctx.hasUI) {
-        const labelToModel = new Map<string, { provider: string; id: string }>();
+      // TUI: full-screen paged picker (same UX as /model — pages of 6 + (n/total)).
+      if (ctx.mode === "tui") {
         const sorted = [...vision].sort((a, b) => {
           const aCur = a.provider === eyeProvider && a.id === eyeModel ? 0 : 1;
           const bCur = b.provider === eyeProvider && b.id === eyeModel ? 0 : 1;
           return aCur - bCur || a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
         });
-        const options = sorted.map((m) => {
+        const items: SelectItem[] = sorted.map((m) => {
+          const current = m.provider === eyeProvider && m.id === eyeModel;
+          return {
+            value: `${m.provider}/${m.id}`,
+            label: `${m.id}${current ? " ✓" : ""}`,
+            description: `[${m.provider}] — $${fmtCost(m.cost.input)}/$${fmtCost(m.cost.output)} per MTok`,
+          };
+        });
+        const chosen = await ctx.ui.custom<string | null>(
+          (tui, theme, _kb, done) => new EyePickerComponent(tui, theme, items, done),
+        );
+        if (!chosen) return; // cancelled (Esc)
+        const slash = chosen.indexOf("/");
+        const target = { provider: chosen.slice(0, slash), id: chosen.slice(slash + 1) };
+        if (target.provider === eyeProvider && target.id === eyeModel) {
+          ctx.ui.notify(`👁️ Already using ${eyeProvider}/${eyeModel}`, "info");
+          return;
+        }
+        applyEyeTarget(target.provider, target.id, ctx);
+        return;
+      }
+
+      // RPC: interactive select dialog over the JSON protocol.
+      if (ctx.hasUI) {
+        const labelToModel = new Map<string, { provider: string; id: string }>();
+        const options = vision.map((m) => {
           const current = m.provider === eyeProvider && m.id === eyeModel ? " ← current" : "";
           const label = `${m.provider}/${m.id} — $${fmtCost(m.cost.input)}/$${fmtCost(m.cost.output)} per MTok${current}`;
           labelToModel.set(label, { provider: m.provider, id: m.id });

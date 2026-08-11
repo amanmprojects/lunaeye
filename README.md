@@ -40,11 +40,12 @@ The eye model is runtime-switchable and persisted to `~/.pi/agent/luna-eye.json`
 
 ## Commands
 
-- `/eye` — **interactive picker** (like `/model`): full-screen, keyboard-navigable
-  list of all vision-capable models across your configured providers, with
-  prices per MTok, the current eye marked and listed first. Arrow keys + Enter
-  to select, Esc to cancel. Falls back to a numbered list in non-interactive
-  modes.
+- `/eye` — **paged interactive picker** (like `/model`): full-screen,
+  keyboard-navigable list of all vision-capable models across your configured
+  providers, **max 6 visible rows** with a `(n/total)` page indicator as you
+  scroll (↑/↓, wrap-around). Current eye listed first with `✓`. Enter selects,
+  Esc cancels. In RPC mode it becomes a plain select dialog; in print mode a
+  numbered list.
 - `/eye set <n>` — pick by list number (scriptable, works in `-p` mode)
 - `/eye set <model>` — e.g. `/eye set mimo-v2.5` (if unique)
 - `/eye set <provider>/<model>` — e.g. `/eye set opencode-go/mimo-v2.5`
