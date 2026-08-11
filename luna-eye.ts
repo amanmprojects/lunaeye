@@ -46,9 +46,9 @@ function isBlind(model: { input: readonly string[] } | undefined): boolean {
   return !model || !model.input.includes("image");
 }
 
-function imageKey(img: ImageContent): string {
+function imageKey(img: ImageContent, instruction: string): string {
   return createHash("sha256")
-    .update(`${img.mimeType}\n${img.data}`)
+    .update(`${img.mimeType}\n${img.data}\n${instruction}`)
     .digest("hex")
     .slice(0, 24);
 }
@@ -79,7 +79,7 @@ async function describeImage(
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
 ): Promise<string> {
-  const key = imageKey(img);
+  const key = imageKey(img, instruction);
   const cached = descriptionCache.get(key);
   if (cached !== undefined) return cached;
 
